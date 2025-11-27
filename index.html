@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D 挥手粒子系统（高灵敏版）</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; touch-action: none; }
+        
+        #input_video { 
+            position: absolute; top: 0; left: 0; opacity: 0; z-index: -1; 
+            width: 1px; height: 1px; pointer-events: none;
+        }
+        
+        /* 顶部提示栏 */
+        #ui-panel {
+            position: absolute; top: 20px; left: 0; right: 0;
+            text-align: center; pointer-events: none; z-index: 10;
+        }
+
+        /* 当前形状名称的大标题 */
+        #shape-name {
+            font-size: 32px; font-weight: bold; color: white;
+            text-shadow: 0 0 10px rgba(0,255,200,0.8);
+            transition: transform 0.3s;
+        }
+
+        /* 操作提示 */
+        .instruction {
+            color: rgba(255,255,255,0.7); font-size: 14px; margin-top: 5px;
+            background: rgba(0,0,0,0.4); display: inline-block;
+            padding: 4px 12px; border-radius: 20px;
+        }
+
+        /* 切换时的弹窗提示 (Toast) */
+        #toast {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%) scale(0.8);
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(10px);
+            padding: 20px 40px; border-radius: 15px;
+            color: #fff; font-size: 24px; font-weight: bold;
+            opacity: 0; transition: all 0.3s; pointer-events: none;
+            border: 1px solid rgba(255,255,255,0.3);
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+            z-index: 50;
+        }
+        #toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #00ffc8; font-size: 18px; z-index: 200; text-align: center;
+            background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px;
+        }
+    </style>
+    <script src="https://unpkg.com/three@0.132.2/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loading">正在启动摄像头...<br><span style="font-size:12px;color:#ccc">首次加载较慢，请稍候</span></div>
+
+    <div id="ui-panel">
+        <div id="shape-name">❤️ 爱心</div>
+        <div class="instruction">👋 向左/向右挥手切换形状 | 🤏 捏合手指缩放</div>
+    </div>
+
+    <!-- 切换提示框 -->
+    <div id="toast"></div>
+
+    <video id="input_video" playsinline webkit-playsinline muted autoplay></video>
+
+<script>
+    // ================= 配置参数 =================
+    const PARTICLE_COUNT = 15000;
+    const PARTICLE_SIZE = 0.25;
+    
+    // 形状列表定义
+    const SHAPE_LIST = [
+        { key: 'heart', name: '❤️ 爱心', color: '#ff0055' },
+        { key: 'flower', name: '🌸 花朵', color: '#ff66b2' },
+        { key: 'saturn', name: '🪐 土星', color: '#00ccff' },
+        { key: 'buddha', name: '🧘 佛像', color: '#ffcc00' },
+        { key: 'fireworks', name: '🎆 烟花', color: '#aa00ff' },
+        { key: 'sphere', name: '🔮 球体', color: '#00ffc8' }
+    ];
+
+    let currentShapeIndex = 0; // 当前形状索引
+    let handInteractionFactor = 1.0;
+    let targetColor = new THREE.Color(SHAPE_LIST[0].color);
+
+    // ================= THREE.JS 初始化 =================
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.z = 25;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+
+    // ================= 粒子系统 =================
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(PARTICLE_COUNT * 3);
+    const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+    
+    for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+        positions[i] = (Math.random() - 0.5) * 50;
+        targetPositions[i] = positions[i];
+    }
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    const material = new THREE.PointsMaterial({
+        size: PARTICLE_SIZE,
+        color: targetColor,
+        transparent: true,
+        opacity: 0.85,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+    const particles = new THREE.Points(geometry, material);
+    scene.add(particles);
+
+    // ================= 形状算法 =================
+    function getPointOnSphere(r) {
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        return { x: r * Math.sin(phi) * Math.cos(theta), y: r * Math.sin(phi) * Math.sin(theta), z: r * Math.cos(phi) };
+    }
+
+    const ShapeGenerators = {
+        heart: () => {
+            const t = Math.random() * Math.PI * 2, u = Math.random() * Math.PI;
+            const x = 16 * Math.pow(Math.sin(u), 3) * Math.sin(t);
+            const y = (13 * Math.cos(u) - 5 * Math.cos(2*u) - 2 * Math.cos(3*u) - Math.cos(4*u));
+            const z = 16 * Math.pow(Math.sin(u), 3) * Math.cos(t) * 0.5;
+            return [x * 0.6, y * 0.6, z * 0.6];
+        },
+        saturn: () => {
+            if (Math.random() > 0.4) {
+                const angle = Math.random() * Math.PI * 2, dist = 9 + Math.random() * 4;
+                return [Math.cos(angle) * dist, (Math.random()-0.5)*0.5, Math.sin(angle) * dist];
+            }
+            const p = getPointOnSphere(5); return [p.x, p.y, p.z];
+        },
+        flower: () => {
+            const u = Math.random() * Math.PI * 4, v = Math.random() * Math.PI * 2;
+            const rad = 8 * Math.sin(3 * u);
+            return [rad * Math.sin(u) * Math.cos(v), rad * Math.cos(u) * Math.cos(v) + 4, rad * Math.sin(v)];
+        },
+        buddha: () => {
+            const r = Math.random();
+            let p, yOffset;
+            if (r < 0.25) { p = getPointOnSphere(2); yOffset = 6; }
+            else if (r < 0.65) { p = getPointOnSphere(4.5); p.y*=0.8; yOffset = 1; }
+            else { p = getPointOnSphere(6); p.y*=0.4; yOffset = -4; }
+            return [p.x, p.y + yOffset, p.z];
+        },
+        fireworks: () => { const p = getPointOnSphere(Math.random() * 15); return [p.x, p.y, p.z]; },
+        sphere: () => { const p = getPointOnSphere(10); return [p.x, p.y, p.z]; }
+    };
+
+    function updateParticlesTarget(shapeKey) {
+        const generator = ShapeGenerators[shapeKey];
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const pos = generator(i);
+            targetPositions[i * 3] = pos[0];
+            targetPositions[i * 3 + 1] = pos[1];
+            targetPositions[i * 3 + 2] = pos[2];
+        }
+    }
+    updateParticlesTarget('heart'); // 默认初始形状
+
+    // ================= 切换逻辑 (Toast UI) =================
+    const toast = document.getElementById('toast');
+    let toastTimer;
+
+    function showToast(text, direction) {
+        toast.innerText = (direction === 'next' ? '⏩ ' : '⏪ ') + text;
+        toast.classList.add('show');
+        
+        // 缩放一下标题产生视觉反馈
+        const title = document.getElementById('shape-name');
+        title.style.transform = "scale(1.2)";
+        setTimeout(() => title.style.transform = "scale(1)", 200);
+
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+            toast.classList.remove('show');
+        }, 1500);
+    }
+
+    function switchShape(step) {
+        // 计算新索引 (处理循环)
+        currentShapeIndex = (currentShapeIndex + step + SHAPE_LIST.length) % SHAPE_LIST.length;
+        
+        const shapeData = SHAPE_LIST[currentShapeIndex];
+        
+        // 更新 UI
+        document.getElementById('shape-name').innerText = shapeData.name;
+        document.getElementById('shape-name').style.color = shapeData.color;
+        showToast(shapeData.name, step > 0 ? 'next' : 'prev');
+
+        // 更新粒子目标和颜色
+        updateParticlesTarget(shapeData.key);
+        targetColor.set(shapeData.color);
+    }
+
+    // ================= MediaPipe 手势与挥手检测 (高灵敏优化版) =================
+    const videoElement = document.getElementById('input_video');
+    
+    // 【优化1】降低挥手阈值 + 缩短冷却时间，提升触发灵敏度
+    const SWIPE_THRESHOLD = 0.03; // 从0.08降至0.03，更小的位移就能触发
+    const COOLDOWN_MS = 600;      // 从1000ms降至600ms，切换更频繁
+    const SWIPE_WINDOW = 5;       // 新增：挥手检测的时间窗口（保存最近5帧的手腕位置）
+    let wristXHistory = [];       // 新增：存储最近的手腕X坐标，避免单帧抖动误判
+    let lastSwitchTime = 0;
+    let lastWristX = null;
+
+    // 【优化2】提升MediaPipe检测配置，降低检测门槛 + 使用高精度模型
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,          // 从0升至1，使用高精度模型（检测更准）
+        minDetectionConfidence: 0.3, // 从0.5降至0.3，更低的置信度也能检测到手
+        minTrackingConfidence: 0.3,  // 从0.5降至0.3，跟踪更稳定
+        selfieMode: true             // 新增：强制自拍模式，适配前置摄像头镜像
+    });
+
+    hands.onResults((results) => {
+        document.getElementById('loading').style.display = 'none';
+        
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+            
+            // 1. 捏合缩放逻辑（【优化3】提升缩放响应速度）
+            const thumb = landmarks[4];
+            const index = landmarks[8];
+            const dist = Math.sqrt(Math.pow(thumb.x - index.x, 2) + Math.pow(thumb.y - index.y, 2) + Math.pow(thumb.z - index.z, 2));
+            // 优化缩放映射：降低基础阈值 + 提高放大系数，缩放更灵敏
+            let pinchFactor = (dist - 0.01) * 8; 
+            pinchFactor = Math.max(0.1, Math.min(2.5, pinchFactor + 0.4));
+            // 加快平滑过渡速度：从0.1升至0.25，缩放响应更快
+            handInteractionFactor += (pinchFactor - handInteractionFactor) * 0.25;
+
+            // 2. 挥手检测逻辑（【优化4】时间窗口累计位移，避免单帧抖动）
+            const currWristX = landmarks[0].x;
+            const now = Date.now();
+
+            // 维护最近5帧的手腕X坐标
+            wristXHistory.push(currWristX);
+            if (wristXHistory.length > SWIPE_WINDOW) {
+                wristXHistory.shift();
+            }
+
+            if (wristXHistory.length === SWIPE_WINDOW && (now - lastSwitchTime > COOLDOWN_MS)) {
+                // 计算时间窗口内的总位移（而非单帧差值）
+                const totalDiff = wristXHistory[wristXHistory.length - 1] - wristXHistory[0];
+                
+                // 触发挥手判定：总位移超过阈值
+                if (totalDiff > SWIPE_THRESHOLD) {
+                    switchShape(1); // 向右挥 -> 下一个
+                    lastSwitchTime = now;
+                    wristXHistory = []; // 清空历史，避免连续触发
+                } else if (totalDiff < -SWIPE_THRESHOLD) {
+                    switchShape(-1); // 向左挥 -> 上一个
+                    lastSwitchTime = now;
+                    wristXHistory = []; // 清空历史，避免连续触发
+                }
+            }
+
+            lastWristX = currWristX;
+
+        } else {
+            // 没检测到手，重置状态
+            handInteractionFactor += (1.0 - handInteractionFactor) * 0.1; // 加快复位速度
+            lastWristX = null;
+            wristXHistory = []; // 清空历史
+        }
+    });
+
+    // 【优化5】提高摄像头分辨率，提升检测精度（根据设备性能调整）
+    const cameraUtils = new Camera(videoElement, {
+        onFrame: async () => { await hands.send({image: videoElement}); },
+        width: 1280,  // 从640升至1280，更高分辨率
+        height: 720,  // 从480升至720，更高分辨率
+        facingMode: 'user'
+    });
+    cameraUtils.start();
+
+    // ================= 动画循环（【优化6】提升粒子响应速度） =================
+    let time = 0;
+    function animate() {
+        requestAnimationFrame(animate);
+        time += 0.01;
+        
+        // 加快颜色渐变速度：从0.05升至0.15
+        material.color.lerp(targetColor, 0.15);
+        
+        // 整体旋转加速：从0.15升至0.2，视觉更灵动
+        particles.rotation.y = time * 0.2;
+        particles.rotation.x = time * 0.05; // 新增X轴旋转，增加动态效果
+        
+        const posArr = particles.geometry.attributes.position.array;
+        const currentKey = SHAPE_LIST[currentShapeIndex].key;
+        const isFireworks = currentKey === 'fireworks';
+        
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const ix = i * 3, iy = ix + 1, iz = ix + 2;
+            let tx = targetPositions[ix], ty = targetPositions[iy], tz = targetPositions[iz];
+
+            // 烟花特殊动态
+            if (isFireworks) {
+                const pulse = 1 + Math.sin(time * 5) * 0.6; // 加快烟花脉动速度
+                tx *= pulse; ty *= pulse; tz *= pulse;
+            }
+
+            // 应用手势缩放
+            tx *= handInteractionFactor; ty *= handInteractionFactor; tz *= handInteractionFactor;
+            
+            // 减少随机噪点，避免粒子过度抖动影响视觉
+            tx += (Math.random()-0.5)*0.1; ty += (Math.random()-0.5)*0.1; tz += (Math.random()-0.5)*0.1;
+
+            // 加快粒子移动速度：从0.08升至0.15，粒子响应更敏捷
+            posArr[ix] += (tx - posArr[ix]) * 0.15;
+            posArr[iy] += (ty - posArr[iy]) * 0.15;
+            posArr[iz] += (tz - posArr[iz]) * 0.15;
+        }
+        
+        particles.geometry.attributes.position.needsUpdate = true;
+        renderer.render(scene, camera);
+    }
+    
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+    
+    animate();
+</script>
+</body>
+</html>
