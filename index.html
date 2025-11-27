@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>3D 挥手粒子系统（高灵敏版）</title>
+    <title>3D 挥手粒子系统（防误触版）</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; touch-action: none; }
         
@@ -210,25 +210,25 @@
         targetColor.set(shapeData.color);
     }
 
-    // ================= MediaPipe 手势与挥手检测 (高灵敏优化版) =================
+    // ================= MediaPipe 手势与挥手检测 (防误触版) =================
     const videoElement = document.getElementById('input_video');
     
-    // 【优化1】降低挥手阈值 + 缩短冷却时间，提升触发灵敏度
-    const SWIPE_THRESHOLD = 0.03; // 从0.08降至0.03，更小的位移就能触发
-    const COOLDOWN_MS = 600;      // 从1000ms降至600ms，切换更频繁
-    const SWIPE_WINDOW = 5;       // 新增：挥手检测的时间窗口（保存最近5帧的手腕位置）
-    let wristXHistory = [];       // 新增：存储最近的手腕X坐标，避免单帧抖动误判
+    // 【核心修改1】调整挥手检测参数，降低灵敏度
+    const SWIPE_THRESHOLD = 0.08; // 从0.03调回0.08，需要更大的位移才触发
+    const COOLDOWN_MS = 1000;      // 从600ms调回1000ms，延长冷却时间
+    const SWIPE_WINDOW = 8;        // 从5帧增至8帧，判定更稳定
+    let wristXHistory = [];        // 存储最近的手腕X坐标
     let lastSwitchTime = 0;
     let lastWristX = null;
 
-    // 【优化2】提升MediaPipe检测配置，降低检测门槛 + 使用高精度模型
+    // 【核心修改2】提高手部检测置信度，减少误检测
     const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
     hands.setOptions({
         maxNumHands: 1,
-        modelComplexity: 1,          // 从0升至1，使用高精度模型（检测更准）
-        minDetectionConfidence: 0.3, // 从0.5降至0.3，更低的置信度也能检测到手
-        minTrackingConfidence: 0.3,  // 从0.5降至0.3，跟踪更稳定
-        selfieMode: true             // 新增：强制自拍模式，适配前置摄像头镜像
+        modelComplexity: 1,          
+        minDetectionConfidence: 0.5, // 从0.3调回0.5，过滤模糊手部轮廓
+        minTrackingConfidence: 0.5,  // 从0.3调回0.5，提升跟踪稳定性
+        selfieMode: true             
     });
 
     hands.onResults((results) => {
@@ -237,39 +237,50 @@
         if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
             const landmarks = results.multiHandLandmarks[0];
             
-            // 1. 捏合缩放逻辑（【优化3】提升缩放响应速度）
+            // 1. 捏合缩放逻辑
             const thumb = landmarks[4];
             const index = landmarks[8];
             const dist = Math.sqrt(Math.pow(thumb.x - index.x, 2) + Math.pow(thumb.y - index.y, 2) + Math.pow(thumb.z - index.z, 2));
-            // 优化缩放映射：降低基础阈值 + 提高放大系数，缩放更灵敏
             let pinchFactor = (dist - 0.01) * 8; 
             pinchFactor = Math.max(0.1, Math.min(2.5, pinchFactor + 0.4));
-            // 加快平滑过渡速度：从0.1升至0.25，缩放响应更快
             handInteractionFactor += (pinchFactor - handInteractionFactor) * 0.25;
 
-            // 2. 挥手检测逻辑（【优化4】时间窗口累计位移，避免单帧抖动）
+            // 2. 挥手检测逻辑（【核心修改3】增加方向一致性校验）
             const currWristX = landmarks[0].x;
             const now = Date.now();
 
-            // 维护最近5帧的手腕X坐标
+            // 维护最近8帧的手腕X坐标，过滤微小抖动
             wristXHistory.push(currWristX);
             if (wristXHistory.length > SWIPE_WINDOW) {
                 wristXHistory.shift();
             }
 
             if (wristXHistory.length === SWIPE_WINDOW && (now - lastSwitchTime > COOLDOWN_MS)) {
-                // 计算时间窗口内的总位移（而非单帧差值）
+                // 计算时间窗口内的总位移
                 const totalDiff = wristXHistory[wristXHistory.length - 1] - wristXHistory[0];
                 
-                // 触发挥手判定：总位移超过阈值
-                if (totalDiff > SWIPE_THRESHOLD) {
-                    switchShape(1); // 向右挥 -> 下一个
-                    lastSwitchTime = now;
-                    wristXHistory = []; // 清空历史，避免连续触发
-                } else if (totalDiff < -SWIPE_THRESHOLD) {
-                    switchShape(-1); // 向左挥 -> 上一个
-                    lastSwitchTime = now;
-                    wristXHistory = []; // 清空历史，避免连续触发
+                // 【核心修改4】增加方向一致性检查：确保连续帧都是同一方向移动
+                let isDirectionConsistent = true;
+                for (let i = 1; i < wristXHistory.length; i++) {
+                    const frameDiff = wristXHistory[i] - wristXHistory[i-1];
+                    // 如果某一帧的移动方向与总位移方向相反，判定为抖动
+                    if (Math.sign(frameDiff) !== Math.sign(totalDiff) && Math.abs(frameDiff) > 0.01) {
+                        isDirectionConsistent = false;
+                        break;
+                    }
+                }
+
+                // 只有位移达标且方向一致时，才触发挥手切换
+                if (isDirectionConsistent) {
+                    if (totalDiff > SWIPE_THRESHOLD) {
+                        switchShape(1); 
+                        lastSwitchTime = now;
+                        wristXHistory = []; 
+                    } else if (totalDiff < -SWIPE_THRESHOLD) {
+                        switchShape(-1); 
+                        lastSwitchTime = now;
+                        wristXHistory = []; 
+                    }
                 }
             }
 
@@ -277,33 +288,31 @@
 
         } else {
             // 没检测到手，重置状态
-            handInteractionFactor += (1.0 - handInteractionFactor) * 0.1; // 加快复位速度
+            handInteractionFactor += (1.0 - handInteractionFactor) * 0.1;
             lastWristX = null;
-            wristXHistory = []; // 清空历史
+            wristXHistory = [];
         }
     });
 
-    // 【优化5】提高摄像头分辨率，提升检测精度（根据设备性能调整）
+    // 摄像头配置
     const cameraUtils = new Camera(videoElement, {
         onFrame: async () => { await hands.send({image: videoElement}); },
-        width: 1280,  // 从640升至1280，更高分辨率
-        height: 720,  // 从480升至720，更高分辨率
+        width: 1280,  
+        height: 720,  
         facingMode: 'user'
     });
     cameraUtils.start();
 
-    // ================= 动画循环（【优化6】提升粒子响应速度） =================
+    // ================= 动画循环 =================
     let time = 0;
     function animate() {
         requestAnimationFrame(animate);
         time += 0.01;
         
-        // 加快颜色渐变速度：从0.05升至0.15
         material.color.lerp(targetColor, 0.15);
         
-        // 整体旋转加速：从0.15升至0.2，视觉更灵动
         particles.rotation.y = time * 0.2;
-        particles.rotation.x = time * 0.05; // 新增X轴旋转，增加动态效果
+        particles.rotation.x = time * 0.05;
         
         const posArr = particles.geometry.attributes.position.array;
         const currentKey = SHAPE_LIST[currentShapeIndex].key;
@@ -315,17 +324,17 @@
 
             // 烟花特殊动态
             if (isFireworks) {
-                const pulse = 1 + Math.sin(time * 5) * 0.6; // 加快烟花脉动速度
+                const pulse = 1 + Math.sin(time * 5) * 0.6;
                 tx *= pulse; ty *= pulse; tz *= pulse;
             }
 
             // 应用手势缩放
             tx *= handInteractionFactor; ty *= handInteractionFactor; tz *= handInteractionFactor;
             
-            // 减少随机噪点，避免粒子过度抖动影响视觉
+            // 减少随机噪点
             tx += (Math.random()-0.5)*0.1; ty += (Math.random()-0.5)*0.1; tz += (Math.random()-0.5)*0.1;
 
-            // 加快粒子移动速度：从0.08升至0.15，粒子响应更敏捷
+            // 粒子移动速度
             posArr[ix] += (tx - posArr[ix]) * 0.15;
             posArr[iy] += (ty - posArr[iy]) * 0.15;
             posArr[iz] += (tz - posArr[iz]) * 0.15;
